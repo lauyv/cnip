@@ -1,0 +1,8 @@
+.claude/settings.local.json
+
+# Python
+.venv/
+__pycache__/
+
+chnroutes.json
+
