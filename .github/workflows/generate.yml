@@ -1,0 +1,49 @@
+name: Generate China IP Database
+
+on:
+  schedule:
+    - cron: "0 21 * * *" # 北京时间每天 05:00
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: Run generator
+        run: go mod download && go run main.go
+
+      - name: Compile sing-box rule-set
+        run: |
+          bash <(curl -fsSL https://sing-box.app/deb-install.sh)
+          sing-box version
+          sing-box rule-set compile chnroutes.json
+          rm -rf chnroutes.json
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add chnroutes.*
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            LAST_MSG=$(git log -1 --format="%s")
+            if [[ "$LAST_MSG" == "update geoip data [skip ci]" ]]; then
+              git commit --amend --no-edit
+              git push --force-with-lease
+            else
+              git commit -m "update geoip data [skip ci]"
+              git push
+            fi
+          fi
