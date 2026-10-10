@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,11 +51,22 @@ var lanCIDRs = []string{
 	"ff00::/8",
 }
 
-func main() {
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		log.Fatalf("创建输出目录失败: %v", err)
-	}
+type singBoxRuleSet struct {
+	Version int             `json:"version"`
+	Rules   []singBoxIPCIDR `json:"rules"`
+}
 
+type singBoxIPCIDR struct {
+	IPCIDR []string `json:"ip_cidr"`
+}
+
+func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	writer, err := mmdbwriter.New(mmdbwriter.Options{
 		DatabaseType:            "GeoLite2-Country",
 		RecordSize:              24,
@@ -60,10 +74,10 @@ func main() {
 		DisableIPv4Aliasing:     true, // 允许写入 ::ffff:0:0/96 等 IPv4 映射段
 	})
 	if err != nil {
-		log.Fatalf("创建 writer 失败: %v", err)
+		return fmt.Errorf("创建 writer 失败: %w", err)
 	}
 
-	record := mmdbtype.Map{
+	cnRecord := mmdbtype.Map{
 		"country": mmdbtype.Map{
 			"geoname_id":           mmdbtype.Uint32(1814991),
 			"is_in_european_union": mmdbtype.Bool(false),
@@ -92,60 +106,33 @@ func main() {
 	}
 
 	var allCIDRs []string
-	for _, url := range []string{ipv4URL, ipv6URL} {
-		cidrs, err := fetchAndInsert(writer, url, record)
+	for _, source := range []struct {
+		url       string
+		ipVersion int
+	}{{ipv4URL, 4}, {ipv6URL, 6}} {
+		cidrs, err := fetchAndInsert(writer, source.url, source.ipVersion, cnRecord)
 		if err != nil {
-			log.Fatalf("处理 %s 失败: %v", url, err)
+			return fmt.Errorf("处理 %s 失败: %w", source.url, err)
 		}
-		fmt.Printf("%s: %d 条\n", url, len(cidrs))
+		fmt.Printf("%s: %d 条\n", source.url, len(cidrs))
 		allCIDRs = append(allCIDRs, cidrs...)
 	}
 
 	lanCount, err := insertStaticCIDRs(writer, lanCIDRs, lanRecord)
 	if err != nil {
-		log.Fatalf("插入 LAN 地址失败: %v", err)
+		return fmt.Errorf("插入 LAN 地址失败: %w", err)
 	}
 	fmt.Printf("LAN/私有地址: %d 条（iso_code=LAN）\n", lanCount)
 
-	// 写入 MMDB
-	mmdbPath := filepath.Join(outputDir, "chnroutes.mmdb")
-	mmdbFile, err := os.Create(mmdbPath)
-	if err != nil {
-		log.Fatalf("创建 %s 失败: %v", mmdbPath, err)
-	}
-	defer closeFile(mmdbFile)
-
-	if _, err := writer.WriteTo(mmdbFile); err != nil {
-		log.Fatalf("写入 %s 失败: %v", mmdbPath, err)
-	}
-
-	// 写入合并 txt
-	txtPath := filepath.Join(outputDir, "chnroutes.txt")
-	txtFile, err := os.Create(txtPath)
-	if err != nil {
-		log.Fatalf("创建 %s 失败: %v", txtPath, err)
-	}
-	defer closeFile(txtFile)
-
-	w := bufio.NewWriter(txtFile)
-	for _, cidr := range allCIDRs {
-		if _, err := fmt.Fprintln(w, cidr); err != nil {
-			log.Fatalf("写入 %s 失败: %v", txtPath, err)
-		}
-	}
-	if err := w.Flush(); err != nil {
-		log.Fatalf("刷新 %s 失败: %v", txtPath, err)
-	}
-
-	// 写入 sing-box rule set JSON
-	if err := writeSingBoxJSON(filepath.Join(outputDir, "chnroutes.json"), allCIDRs); err != nil {
-		log.Fatalf("写入 sing-box JSON 失败: %v", err)
+	if err := writeOutputs(outputDir, writer, allCIDRs); err != nil {
+		return err
 	}
 
 	fmt.Printf("✅ chnroutes.mmdb（CN + LAN）+ chnroutes.txt + chnroutes.json，中国 %d 条、私有 %d 条\n", len(allCIDRs), lanCount)
+	return nil
 }
 
-func fetchAndInsert(writer *mmdbwriter.Tree, url string, value mmdbtype.DataType) ([]string, error) {
+func fetchAndInsert(writer *mmdbwriter.Tree, url string, ipVersion int, value mmdbtype.DataType) ([]string, error) {
 	fmt.Printf("⬇️  %s\n", url)
 
 	resp, err := httpGet(url)
@@ -154,23 +141,52 @@ func fetchAndInsert(writer *mmdbwriter.Tree, url string, value mmdbtype.DataType
 	}
 	defer closeBody(resp)
 
+	cidrs, err := parseCIDRs(resp.Body, ipVersion)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := insertStaticCIDRs(writer, cidrs, value); err != nil {
+		return nil, err
+	}
+	return cidrs, nil
+}
+
+// parseCIDRs 校验地址族，规范化前缀，并按首次出现的顺序去重。
+func parseCIDRs(r io.Reader, ipVersion int) ([]string, error) {
+	if ipVersion != 4 && ipVersion != 6 {
+		return nil, fmt.Errorf("不支持的 IP 版本: %d", ipVersion)
+	}
 	var cidrs []string
-	scanner := bufio.NewScanner(resp.Body)
+	seen := make(map[netip.Prefix]struct{})
+	scanner := bufio.NewScanner(r)
+	lineNumber := 0
 	for scanner.Scan() {
+		lineNumber++
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		_, network, err := net.ParseCIDR(line)
+		prefix, err := netip.ParsePrefix(line)
 		if err != nil {
-			return cidrs, fmt.Errorf("解析 CIDR %q 失败: %w", line, err)
+			return nil, fmt.Errorf("第 %d 行解析 CIDR %q 失败: %w", lineNumber, line, err)
 		}
-		if err := writer.Insert(network, value); err != nil {
-			return cidrs, fmt.Errorf("插入 %q 失败: %w", line, err)
+		if prefix.Addr().Is4In6() || prefix.Addr().Is4() != (ipVersion == 4) {
+			return nil, fmt.Errorf("第 %d 行 CIDR %q 不是 IPv%d 地址段", lineNumber, line, ipVersion)
 		}
-		cidrs = append(cidrs, line)
+		prefix = prefix.Masked()
+		if _, exists := seen[prefix]; exists {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		cidrs = append(cidrs, prefix.String())
 	}
-	return cidrs, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("读取 CIDR 数据失败: %w", err)
+	}
+	if len(cidrs) == 0 {
+		return nil, fmt.Errorf("IPv%d 数据源没有有效 CIDR", ipVersion)
+	}
+	return cidrs, nil
 }
 
 // insertStaticCIDRs 把内置的保留/私有地址段写入 MMDB。
@@ -204,19 +220,53 @@ func httpGet(url string) (*http.Response, error) {
 	return resp, nil
 }
 
-func closeFile(f *os.File) {
-	if err := f.Close(); err != nil {
-		log.Printf("关闭文件失败: %v", err)
+func closeBody(r *http.Response) {
+	if err := r.Body.Close(); err != nil {
+		log.Printf("关闭响应体失败: %v", err)
 	}
 }
 
-type singBoxRuleSet struct {
-	Version int             `json:"version"`
-	Rules   []singBoxIPCIDR `json:"rules"`
-}
+// writeOutputs 在同一文件系统的临时目录生成全部产物，成功后再替换 dist。
+func writeOutputs(dir string, writer *mmdbwriter.Tree, cidrs []string) error {
+	dir = filepath.Clean(dir)
+	parent := filepath.Dir(dir)
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		return fmt.Errorf("创建输出父目录失败: %w", err)
+	}
+	staging, err := os.MkdirTemp(parent, "."+filepath.Base(dir)+"-staging-*")
+	if err != nil {
+		return fmt.Errorf("创建临时输出目录失败: %w", err)
+	}
+	defer func() {
+		if err := os.RemoveAll(staging); err != nil {
+			log.Printf("清理临时输出目录 %s 失败: %v", staging, err)
+		}
+	}()
 
-type singBoxIPCIDR struct {
-	IPCIDR []string `json:"ip_cidr"`
+	if err := writeFile(filepath.Join(staging, "chnroutes.mmdb"), func(w io.Writer) error {
+		_, err := writer.WriteTo(w)
+		return err
+	}); err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(staging, "chnroutes.txt"), func(w io.Writer) error {
+		buffer := bufio.NewWriter(w)
+		for _, cidr := range cidrs {
+			if _, err := fmt.Fprintln(buffer, cidr); err != nil {
+				return err
+			}
+		}
+		return buffer.Flush()
+	}); err != nil {
+		return err
+	}
+	if err := writeSingBoxJSON(filepath.Join(staging, "chnroutes.json"), cidrs); err != nil {
+		return err
+	}
+	if err := os.Chmod(staging, 0755); err != nil {
+		return fmt.Errorf("设置输出目录权限失败: %w", err)
+	}
+	return replaceOutputDir(staging, dir)
 }
 
 func writeSingBoxJSON(path string, cidrs []string) error {
@@ -230,14 +280,59 @@ func writeSingBoxJSON(path string, cidrs []string) error {
 	if err != nil {
 		return fmt.Errorf("序列化 JSON 失败: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("写入 %s 失败: %w", path, err)
+	return writeFile(path, func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	})
+}
+
+// replaceOutputDir 保留旧目录作为备份；替换失败时恢复旧产物。
+func replaceOutputDir(staging, dir string) error {
+	backup, err := os.MkdirTemp(filepath.Dir(dir), "."+filepath.Base(dir)+"-backup-*")
+	if err != nil {
+		return fmt.Errorf("创建备份目录失败: %w", err)
+	}
+	if err := os.Remove(backup); err != nil {
+		return fmt.Errorf("准备备份路径失败: %w", err)
+	}
+	hasBackup := false
+	if err := os.Rename(dir, backup); err == nil {
+		hasBackup = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("备份旧产物失败: %w", err)
+	}
+	if err := os.Rename(staging, dir); err != nil {
+		if hasBackup {
+			if restoreErr := os.Rename(backup, dir); restoreErr != nil {
+				return errors.Join(
+					fmt.Errorf("替换产物失败: %w", err),
+					fmt.Errorf("恢复旧产物失败，备份保存在 %s: %w", backup, restoreErr),
+				)
+			}
+		}
+		return fmt.Errorf("替换产物失败: %w", err)
+	}
+	if hasBackup {
+		if err := os.RemoveAll(backup); err != nil {
+			log.Printf("产物已更新，清理备份 %s 失败: %v", backup, err)
+		}
 	}
 	return nil
 }
 
-func closeBody(r *http.Response) {
-	if err := r.Body.Close(); err != nil {
-		log.Printf("关闭响应体失败: %v", err)
+func writeFile(path string, write func(io.Writer) error) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("创建 %s 失败: %w", path, err)
 	}
+	if err := writeAndClose(f, write); err != nil {
+		return fmt.Errorf("写入或关闭 %s 失败: %w", path, err)
+	}
+	return nil
+}
+
+// 即使写入失败也关闭文件，并保留写入和关闭两个阶段的错误。
+func writeAndClose(w io.WriteCloser, write func(io.Writer) error) error {
+	writeErr := write(w)
+	return errors.Join(writeErr, w.Close())
 }
