@@ -2,7 +2,8 @@ name: Generate China IP Database
 
 on:
   schedule:
-    - cron: "0 0 * * *" # 北京时间每天 08:00
+    - cron: "0 20 * * *"
+      timezone: "Asia/Shanghai"
   push:
     branches:
       - main

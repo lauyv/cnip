@@ -11,7 +11,7 @@
 
 ## 发布
 
-GitHub Actions 每天构建一次，并在 `main` 更新时自动构建。源码保存在
+GitHub Actions 每天北京时间 20:00 构建一次，并在 `main` 更新时自动构建。源码保存在
 `main` 分支，产物发布到 `rel` 分支；该分支每次发布都会重建，只保留最新结果。
 
 | 文件             | 格式                               |
@@ -67,7 +67,7 @@ go run main.go
 
 通过 GitHub Actions 每天自动更新：
 
-- **定时触发**：北京时间每天 08:00（UTC 00:00）
+- **定时触发**：北京时间每天 20:00（`Asia/Shanghai`，UTC 12:00）
 - **源码更新**：`main` 分支有新提交时
 - **手动触发**：在 Actions 页面点击 "Run workflow"
 
