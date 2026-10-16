@@ -4,21 +4,24 @@
 
 ## 数据来源
 
-| 类型      | 来源                                                                        |
-| --------- | --------------------------------------------------------------------------- |
-| IPv4 CIDR | [misakaio/chnroutes2](https://github.com/misakaio/chnroutes2)               |
-| IPv6 CIDR | [gaoyifan/china-operator-ip](https://github.com/gaoyifan/china-operator-ip) |
+| 类型                    | 来源                                                                                                |
+| ----------------------- | --------------------------------------------------------------------------------------------------- |
+| IPv4 CIDR               | [misakaio/chnroutes2](https://github.com/misakaio/chnroutes2)                                       |
+| IPv6 CIDR               | [gaoyifan/china-operator-ip](https://github.com/gaoyifan/china-operator-ip)                         |
+| Netflix IPv4/IPv6（NF） | [Loyalsoldier/geoip](https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/netflix.txt) |
 
 ## 发布
 
 GitHub Actions 每天北京时间 20:00 构建一次，并在 `main` 更新时自动构建。源码保存在
 `main` 分支，产物发布到 `rel` 分支；该分支每次发布都会重建，只保留最新结果。
 
-| 文件             | 格式                               |
-| ---------------- | ---------------------------------- |
-| `chnroutes.mmdb` | MaxMind GeoIP2 MMDB（含 CN + LAN） |
-| `chnroutes.txt`  | 纯文本 CIDR 列表                   |
-| `chnroutes.srs`  | sing-box 编译后的 rule set         |
+| 文件             | 格式                                    |
+| ---------------- | --------------------------------------- |
+| `chnroutes.mmdb` | MaxMind GeoIP2 MMDB（含 CN + NF + LAN） |
+| `chnroutes.txt`  | 纯文本 CIDR 列表                        |
+| `chnroutes.srs`  | 中国地址 sing-box 编译后的 rule set     |
+| `netflix.txt`    | Netflix IPv4/IPv6 CIDR 列表             |
+| `netflix.srs`    | Netflix sing-box 编译后的 rule set      |
 
 下载地址格式：
 
@@ -32,7 +35,15 @@ https://github.com/lauyv/cnip/raw/rel/<文件名>
 https://github.com/lauyv/cnip/raw/rel/chnroutes.mmdb
 https://github.com/lauyv/cnip/raw/rel/chnroutes.txt
 https://github.com/lauyv/cnip/raw/rel/chnroutes.srs
+https://github.com/lauyv/cnip/raw/rel/netflix.txt
+https://github.com/lauyv/cnip/raw/rel/netflix.srs
 ```
+
+## Netflix 地址
+
+Netflix 上游的 IPv4/IPv6 地址段在 MMDB 中标记为 `NF`，可用
+`GEOIP,NF` 匹配。写入顺序为 NF → CN → LAN，重叠地址优先标记为 LAN，其次为 CN。
+同时独立生成 `netflix.txt` 和 `netflix.srs`。Netflix 地址不会加入仅包含中国地址的 `chnroutes.txt` / `chnroutes.srs`。
 
 ## 私有/局域网地址
 
@@ -46,6 +57,7 @@ MMDB 中除了中国地址（`GEOIP,CN`）外，还把常用的保留/私有地�
 ```yaml
 # Clash / mihomo
 rules:
+  - GEOIP,NF,PROXY
   - GEOIP,CN,DIRECT
   - GEOIP,LAN,DIRECT
 ```
@@ -61,7 +73,7 @@ go mod download
 go run main.go
 ```
 
-输出文件会生成在 `dist/` 目录下。`chnroutes.json` 是编译 SRS 时使用的中间文件。
+输出文件会生成在 `dist/` 目录下。`chnroutes.json` 和 `netflix.json` 是编译 SRS 时使用的中间文件；GitHub Actions 会将它们编译为对应的 `.srs` 后发布。
 
 ## 自动化更新
 

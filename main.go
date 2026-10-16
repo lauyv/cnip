@@ -22,9 +22,10 @@ import (
 var httpClient = &http.Client{Timeout: 60 * time.Second}
 
 const (
-	ipv4URL   = "https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt"
-	ipv6URL   = "https://gaoyifan.github.io/china-operator-ip/china6.txt"
-	outputDir = "dist"
+	ipv4URL    = "https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt"
+	ipv6URL    = "https://gaoyifan.github.io/china-operator-ip/china6.txt"
+	netflixURL = "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/netflix.txt"
+	outputDir  = "dist"
 )
 
 // lanCIDRs 是保留/私有地址段（对应 sing-box private、Clash GEOIP,private 的常用列表），
@@ -105,6 +106,18 @@ func run() error {
 		},
 	}
 
+	nfRecord := mmdbtype.Map{
+		"country": mmdbtype.Map{
+			"iso_code": mmdbtype.String("NF"),
+			"names":    mmdbtype.Map{"en": mmdbtype.String("Netflix")},
+		},
+	}
+	nfCIDRs, err := fetchAndInsert(writer, netflixURL, 0, nfRecord)
+	if err != nil {
+		return fmt.Errorf("处理 %s 失败: %w", netflixURL, err)
+	}
+	fmt.Printf("Netflix: %d 条（iso_code=NF）\n", len(nfCIDRs))
+
 	var allCIDRs []string
 	for _, source := range []struct {
 		url       string
@@ -124,11 +137,11 @@ func run() error {
 	}
 	fmt.Printf("LAN/私有地址: %d 条（iso_code=LAN）\n", lanCount)
 
-	if err := writeOutputs(outputDir, writer, allCIDRs); err != nil {
+	if err := writeOutputs(outputDir, writer, allCIDRs, nfCIDRs); err != nil {
 		return err
 	}
 
-	fmt.Printf("✅ chnroutes.mmdb（CN + LAN）+ chnroutes.txt + chnroutes.json，中国 %d 条、私有 %d 条\n", len(allCIDRs), lanCount)
+	fmt.Printf("✅ chnroutes.mmdb（CN + NF + LAN）+ chnroutes.txt + chnroutes.json + netflix.txt + netflix.json，中国 %d 条、Netflix %d 条、私有 %d 条\n", len(allCIDRs), len(nfCIDRs), lanCount)
 	return nil
 }
 
@@ -151,9 +164,9 @@ func fetchAndInsert(writer *mmdbwriter.Tree, url string, ipVersion int, value mm
 	return cidrs, nil
 }
 
-// parseCIDRs 校验地址族，规范化前缀，并按首次出现的顺序去重。
+// parseCIDRs 校验地址族（0 表示同时接受 IPv4 和 IPv6），规范化前缀，并按首次出现的顺序去重。
 func parseCIDRs(r io.Reader, ipVersion int) ([]string, error) {
-	if ipVersion != 4 && ipVersion != 6 {
+	if ipVersion != 0 && ipVersion != 4 && ipVersion != 6 {
 		return nil, fmt.Errorf("不支持的 IP 版本: %d", ipVersion)
 	}
 	var cidrs []string
@@ -170,7 +183,7 @@ func parseCIDRs(r io.Reader, ipVersion int) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 行解析 CIDR %q 失败: %w", lineNumber, line, err)
 		}
-		if prefix.Addr().Is4In6() || prefix.Addr().Is4() != (ipVersion == 4) {
+		if prefix.Addr().Is4In6() || (ipVersion != 0 && prefix.Addr().Is4() != (ipVersion == 4)) {
 			return nil, fmt.Errorf("第 %d 行 CIDR %q 不是 IPv%d 地址段", lineNumber, line, ipVersion)
 		}
 		prefix = prefix.Masked()
@@ -184,7 +197,7 @@ func parseCIDRs(r io.Reader, ipVersion int) ([]string, error) {
 		return nil, fmt.Errorf("读取 CIDR 数据失败: %w", err)
 	}
 	if len(cidrs) == 0 {
-		return nil, fmt.Errorf("IPv%d 数据源没有有效 CIDR", ipVersion)
+		return nil, fmt.Errorf("数据源没有有效 CIDR（IP 版本: %d）", ipVersion)
 	}
 	return cidrs, nil
 }
@@ -227,7 +240,7 @@ func closeBody(r *http.Response) {
 }
 
 // writeOutputs 在同一文件系统的临时目录生成全部产物，成功后再替换 dist。
-func writeOutputs(dir string, writer *mmdbwriter.Tree, cidrs []string) error {
+func writeOutputs(dir string, writer *mmdbwriter.Tree, cidrs, nfCIDRs []string) error {
 	dir = filepath.Clean(dir)
 	parent := filepath.Dir(dir)
 	if err := os.MkdirAll(parent, 0755); err != nil {
@@ -249,19 +262,24 @@ func writeOutputs(dir string, writer *mmdbwriter.Tree, cidrs []string) error {
 	}); err != nil {
 		return err
 	}
-	if err := writeFile(filepath.Join(staging, "chnroutes.txt"), func(w io.Writer) error {
-		buffer := bufio.NewWriter(w)
-		for _, cidr := range cidrs {
-			if _, err := fmt.Fprintln(buffer, cidr); err != nil {
-				return err
+	for _, output := range []struct {
+		name  string
+		cidrs []string
+	}{{"chnroutes", cidrs}, {"netflix", nfCIDRs}} {
+		if err := writeFile(filepath.Join(staging, output.name+".txt"), func(w io.Writer) error {
+			buffer := bufio.NewWriter(w)
+			for _, cidr := range output.cidrs {
+				if _, err := fmt.Fprintln(buffer, cidr); err != nil {
+					return err
+				}
 			}
+			return buffer.Flush()
+		}); err != nil {
+			return err
 		}
-		return buffer.Flush()
-	}); err != nil {
-		return err
-	}
-	if err := writeSingBoxJSON(filepath.Join(staging, "chnroutes.json"), cidrs); err != nil {
-		return err
+		if err := writeSingBoxJSON(filepath.Join(staging, output.name+".json"), output.cidrs); err != nil {
+			return err
+		}
 	}
 	if err := os.Chmod(staging, 0755); err != nil {
 		return fmt.Errorf("设置输出目录权限失败: %w", err)

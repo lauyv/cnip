@@ -3,7 +3,10 @@ package main
 import (
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -16,6 +19,36 @@ import (
 	"github.com/oschwald/maxminddb-golang/v2"
 )
 
+func TestNetflixSource(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "23.246.0.0/18\n2607:fb10::/32")
+	}))
+	defer server.Close()
+	writer := testTree(t, []string{"23.0.0.0/8"})
+	record := mmdbtype.Map{"country": mmdbtype.Map{"iso_code": mmdbtype.String("NF")}}
+	if _, err := fetchAndInsert(writer, server.URL, 0, record); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "dist")
+	if err := writeOutputs(dir, writer, []string{"23.0.0.0/8"}, []string{"23.246.0.0/18", "2607:fb10::/32"}); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := maxminddb.Open(filepath.Join(dir, "chnroutes.mmdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	for ip, want := range map[string]string{"23.246.0.1": "NF", "2607:fb10::1": "NF", "23.1.1.1": "CN"} {
+		var code string
+		if err := reader.Lookup(netip.MustParseAddr(ip)).DecodePath(&code, "country", "iso_code"); err != nil {
+			t.Fatal(err)
+		}
+		if code != want {
+			t.Fatalf("%s: got %q, want %q", ip, code, want)
+		}
+	}
+}
+
 func TestParseCIDRs(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -25,6 +58,10 @@ func TestParseCIDRs(t *testing.T) {
 	}{
 		{"IPv4", "# comment\n\n 1.2.3.4/24 \n1.2.3.0/24\n8.8.8.8/32\n", 4, []string{"1.2.3.0/24", "8.8.8.8/32"}},
 		{"IPv6", "2400:3200:0000::1/32\n2400:3200::/32\n240e::1/20\n", 6, []string{"2400:3200::/32", "240e::/20"}},
+		{"mixed IPv4 and IPv6", "23.246.1.1/18\n2607:fb10::1/32\n23.246.0.0/18\n", 0, []string{"23.246.0.0/18", "2607:fb10::/32"}},
+		{"mixed empty", "# comment\n", 0, nil},
+		{"mixed mapped IPv4", "::ffff:1.2.3.4/120\n", 0, nil},
+		{"unsupported version", "1.2.3.0/24\n", 5, nil},
 		{"empty", "", 4, nil},
 		{"comments only", "# comment\n \n", 6, nil},
 		{"invalid CIDR", "1.2.3.0/24\ninvalid\n", 4, nil},
@@ -155,7 +192,7 @@ func TestWriteOutputs(t *testing.T) {
 			if existing {
 				seedOldOutput(t, dir)
 			}
-			if err := writeOutputs(dir, testTree(t, cidrs), cidrs); err != nil {
+			if err := writeOutputs(dir, testTree(t, cidrs), cidrs, []string{"23.246.0.0/18", "2607:fb10::/32"}); err != nil {
 				t.Fatal(err)
 			}
 			data, err := os.ReadFile(filepath.Join(dir, "chnroutes.txt"))
@@ -175,6 +212,24 @@ func TestWriteOutputs(t *testing.T) {
 			}
 			if rules.Version != 2 || len(rules.Rules) != 1 || !reflect.DeepEqual(rules.Rules[0].IPCIDR, cidrs) {
 				t.Fatalf("unexpected rules: %+v", rules)
+			}
+			for _, name := range []string{"netflix.txt", "netflix.json"} {
+				data, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := []string{"23.246.0.0/18", "2607:fb10::/32"}
+				if strings.HasSuffix(name, ".json") {
+					var rules singBoxRuleSet
+					if err := json.Unmarshal(data, &rules); err != nil {
+						t.Fatal(err)
+					}
+					if rules.Version != 2 || len(rules.Rules) != 1 || !reflect.DeepEqual(rules.Rules[0].IPCIDR, want) {
+						t.Fatalf("unexpected Netflix rules: %+v", rules)
+					}
+				} else if string(data) != strings.Join(want, "\n")+"\n" {
+					t.Fatalf("unexpected Netflix TXT: %q", data)
+				}
 			}
 			reader, err := maxminddb.Open(filepath.Join(dir, "chnroutes.mmdb"))
 			if err != nil {
@@ -198,7 +253,7 @@ func TestWriteOutputs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(entries) != 3 {
+			if len(entries) != 5 {
 				t.Fatalf("unexpected output files: %v", entries)
 			}
 			entries, err = os.ReadDir(filepath.Dir(dir))
@@ -216,7 +271,7 @@ func TestWriteOutputsFailurePreservesOldOutput(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "dist")
 	seedOldOutput(t, dir)
 	// Invalid UTF-8 makes JSON serialization fail after MMDB and TXT were staged.
-	if err := writeOutputs(dir, testTree(t, []string{"1.2.3.0/24"}), []string{string([]byte{0xff})}); err == nil {
+	if err := writeOutputs(dir, testTree(t, []string{"1.2.3.0/24"}), []string{string([]byte{0xff})}, nil); err == nil {
 		t.Fatal("expected serialization failure")
 	}
 	assertOldOutput(t, dir)

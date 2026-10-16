@@ -36,7 +36,8 @@ jobs:
           bash <(curl -fsSL https://sing-box.app/deb-install.sh)
           sing-box version
           sing-box rule-set compile dist/chnroutes.json
-          rm dist/chnroutes.json
+          sing-box rule-set compile dist/netflix.json
+          rm dist/*.json
 
       - name: Publish rel branch
         env:
