@@ -17,6 +17,7 @@ import (
 
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 var httpClient = &http.Client{Timeout: 60 * time.Second}
@@ -141,7 +142,7 @@ func run() error {
 		return err
 	}
 
-	fmt.Printf("✅ chnroutes.mmdb（CN + NF + LAN）+ chnroutes.txt + chnroutes.json + netflix.txt + netflix.json，中国 %d 条、Netflix %d 条、私有 %d 条\n", len(allCIDRs), len(nfCIDRs), lanCount)
+	fmt.Printf("✅ chnroutes.mmdb（CN + NF + LAN）+ chnroutes.dat + chnroutes.txt + chnroutes.json + netflix.txt + netflix.json，中国 %d 条、Netflix %d 条、私有 %d 条\n", len(allCIDRs), len(nfCIDRs), lanCount)
 	return nil
 }
 
@@ -281,10 +282,45 @@ func writeOutputs(dir string, writer *mmdbwriter.Tree, cidrs, nfCIDRs []string) 
 			return err
 		}
 	}
+	if err := writeGeoIPDAT(filepath.Join(staging, "chnroutes.dat"), cidrs, nfCIDRs); err != nil {
+		return err
+	}
 	if err := os.Chmod(staging, 0755); err != nil {
 		return fmt.Errorf("设置输出目录权限失败: %w", err)
 	}
 	return replaceOutputDir(staging, dir)
+}
+
+// writeGeoIPDAT 按 V2Ray GeoIPList protobuf 格式编码，分组独立保留上游网段。
+// Schema: https://github.com/v2fly/v2ray-core/blob/master/app/router/routercommon/common.proto
+func writeGeoIPDAT(path string, cnCIDRs, nfCIDRs []string) error {
+	var data []byte
+	for _, group := range []struct {
+		code  string
+		cidrs []string
+	}{{"CN", cnCIDRs}, {"NF", nfCIDRs}, {"LAN", lanCIDRs}, {"PRIVATE", lanCIDRs}} {
+		entry := protowire.AppendTag(nil, 1, protowire.BytesType)
+		entry = protowire.AppendString(entry, group.code)
+		for _, cidr := range group.cidrs {
+			prefix, err := netip.ParsePrefix(cidr)
+			if err != nil {
+				return fmt.Errorf("编码 chnroutes.dat %s CIDR %q 失败: %w", group.code, cidr, err)
+			}
+			prefix = prefix.Masked()
+			network := protowire.AppendTag(nil, 1, protowire.BytesType)
+			network = protowire.AppendBytes(network, prefix.Addr().AsSlice())
+			network = protowire.AppendTag(network, 2, protowire.VarintType)
+			network = protowire.AppendVarint(network, uint64(prefix.Bits()))
+			entry = protowire.AppendTag(entry, 2, protowire.BytesType)
+			entry = protowire.AppendBytes(entry, network)
+		}
+		data = protowire.AppendTag(data, 1, protowire.BytesType)
+		data = protowire.AppendBytes(data, entry)
+	}
+	return writeFile(path, func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	})
 }
 
 func writeSingBoxJSON(path string, cidrs []string) error {

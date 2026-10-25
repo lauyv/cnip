@@ -1,6 +1,6 @@
 # geoip-cn
 
-每天自动生成并发布的中国 IP 地址数据库，提供 MMDB、TXT、sing-box rule set 三种格式。
+每天自动生成并发布的中国 IP 地址数据库，提供 MMDB、TXT、sing-box rule set、V2Ray DAT 四种格式。
 
 ## 数据来源
 
@@ -15,13 +15,14 @@
 GitHub Actions 每天北京时间 20:00 构建一次，并在 `main` 更新时自动构建。源码保存在
 `main` 分支，产物发布到 `rel` 分支；该分支每次发布都会重建，只保留最新结果。
 
-| 文件             | 格式                                    |
-| ---------------- | --------------------------------------- |
-| `chnroutes.mmdb` | MaxMind GeoIP2 MMDB（含 CN + NF + LAN） |
-| `chnroutes.txt`  | 纯文本 CIDR 列表                        |
-| `chnroutes.srs`  | 中国地址 sing-box 编译后的 rule set     |
-| `netflix.txt`    | Netflix IPv4/IPv6 CIDR 列表             |
-| `netflix.srs`    | Netflix sing-box 编译后的 rule set      |
+| 文件             | 格式                                                   |
+| ---------------- | ------------------------------------------------------ |
+| `chnroutes.mmdb` | MaxMind GeoIP2 MMDB（含 CN + NF + LAN）                |
+| `chnroutes.dat`  | V2Ray GeoIPList protobuf（含 CN + NF + LAN + PRIVATE） |
+| `chnroutes.txt`  | 纯文本 CIDR 列表                                       |
+| `chnroutes.srs`  | 中国地址 sing-box 编译后的 rule set                    |
+| `netflix.txt`    | Netflix IPv4/IPv6 CIDR 列表                            |
+| `netflix.srs`    | Netflix sing-box 编译后的 rule set                     |
 
 下载地址格式：
 
@@ -33,11 +34,18 @@ https://github.com/lauyv/cnip/raw/rel/<文件名>
 
 ```text
 https://github.com/lauyv/cnip/raw/rel/chnroutes.mmdb
+https://github.com/lauyv/cnip/raw/rel/chnroutes.dat
 https://github.com/lauyv/cnip/raw/rel/chnroutes.txt
 https://github.com/lauyv/cnip/raw/rel/chnroutes.srs
 https://github.com/lauyv/cnip/raw/rel/netflix.txt
 https://github.com/lauyv/cnip/raw/rel/netflix.srs
 ```
+
+## V2Ray 地址库
+
+`chnroutes.dat` 使用 [V2Ray GeoIPList protobuf 格式](https://github.com/v2fly/v2ray-core/blob/master/app/router/routercommon/common.proto)，包含中国地址 `CN`、Netflix 地址 `NF`、私有/保留地址 `LAN` 和内容相同的别名 `PRIVATE`，各分组均包含对应的 IPv4/IPv6 地址段。
+
+将文件放入 V2Ray 资源目录后，可在路由规则的 `ip` 字段使用 `ext:chnroutes.dat:cn`、`ext:chnroutes.dat:nf`、`ext:chnroutes.dat:lan` 或 `ext:chnroutes.dat:private`。各分组独立保留原始网段，重叠地址可同时属于多个分组，匹配结果由路由规则顺序决定。
 
 ## Netflix 地址
 

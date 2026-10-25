@@ -17,6 +17,11 @@ import (
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
 	"github.com/oschwald/maxminddb-golang/v2"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 func TestNetflixSource(t *testing.T) {
@@ -253,7 +258,11 @@ func TestWriteOutputs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(entries) != 5 {
+			assertGeoIPDAT(t, filepath.Join(dir, "chnroutes.dat"), map[string][]string{
+				"CN": cidrs, "NF": {"23.246.0.0/18", "2607:fb10::/32"},
+				"LAN": lanCIDRs, "PRIVATE": lanCIDRs,
+			})
+			if len(entries) != 6 {
 				t.Fatalf("unexpected output files: %v", entries)
 			}
 			entries, err = os.ReadDir(filepath.Dir(dir))
@@ -264,6 +273,99 @@ func TestWriteOutputs(t *testing.T) {
 				t.Fatalf("unexpected leftovers: %v", entries)
 			}
 		})
+	}
+}
+
+// Decode with protobuf's schema-based implementation, independently of the wire encoder.
+func assertGeoIPDAT(t *testing.T, path string, want map[string][]string) {
+	t.Helper()
+	field := func(name string, number int32, kind descriptorpb.FieldDescriptorProto_Type, repeated bool, typeName string) *descriptorpb.FieldDescriptorProto {
+		label := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
+		if repeated {
+			label = descriptorpb.FieldDescriptorProto_LABEL_REPEATED
+		}
+		f := &descriptorpb.FieldDescriptorProto{Name: proto.String(name), Number: proto.Int32(number), Type: kind.Enum(), Label: label.Enum()}
+		if typeName != "" {
+			f.TypeName = proto.String(typeName)
+		}
+		return f
+	}
+	schema, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
+		Name: proto.String("geoip.proto"), Syntax: proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{
+			{Name: proto.String("CIDR"), Field: []*descriptorpb.FieldDescriptorProto{
+				field("ip", 1, descriptorpb.FieldDescriptorProto_TYPE_BYTES, false, ""),
+				field("prefix", 2, descriptorpb.FieldDescriptorProto_TYPE_UINT32, false, ""),
+			}},
+			{Name: proto.String("GeoIP"), Field: []*descriptorpb.FieldDescriptorProto{
+				field("country_code", 1, descriptorpb.FieldDescriptorProto_TYPE_STRING, false, ""),
+				field("cidr", 2, descriptorpb.FieldDescriptorProto_TYPE_MESSAGE, true, ".CIDR"),
+			}},
+			{Name: proto.String("GeoIPList"), Field: []*descriptorpb.FieldDescriptorProto{
+				field("entry", 1, descriptorpb.FieldDescriptorProto_TYPE_MESSAGE, true, ".GeoIP"),
+			}},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := dynamicpb.NewMessage(schema.Messages().ByName("GeoIPList"))
+	if err := proto.Unmarshal(data, message); err != nil {
+		t.Fatal(err)
+	}
+	get := func(m protoreflect.Message, name protoreflect.Name) protoreflect.Value {
+		return m.Get(m.Descriptor().Fields().ByName(name))
+	}
+	got := make(map[string][]string)
+	entries := get(message, "entry").List()
+	for i := 0; i < entries.Len(); i++ {
+		entry := entries.Get(i).Message()
+		code := get(entry, "country_code").String()
+		if _, exists := got[code]; exists {
+			t.Fatalf("duplicate group %s", code)
+		}
+		got[code] = []string{}
+		networks := get(entry, "cidr").List()
+		for j := 0; j < networks.Len(); j++ {
+			network := networks.Get(j).Message()
+			addr, ok := netip.AddrFromSlice(get(network, "ip").Bytes())
+			if !ok {
+				t.Fatal("invalid IP bytes")
+			}
+			prefix := netip.PrefixFrom(addr, int(get(network, "prefix").Uint()))
+			if !prefix.IsValid() || prefix != prefix.Masked() {
+				t.Fatalf("invalid network: %v", prefix)
+			}
+			got[code] = append(got[code], prefix.String())
+		}
+	}
+	normalized := make(map[string][]string, len(want))
+	for code, cidrs := range want {
+		normalized[code] = []string{}
+		for _, cidr := range cidrs {
+			normalized[code] = append(normalized[code], netip.MustParsePrefix(cidr).Masked().String())
+		}
+	}
+	if !reflect.DeepEqual(got, normalized) {
+		t.Fatalf("unexpected GeoIP groups: got %v, want %v", got, want)
+	}
+}
+
+func TestGeoIPDATNormalization(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chnroutes.dat")
+	if err := writeGeoIPDAT(path, []string{"1.2.3.4/24", "240e::1/20", "0.0.0.0/0", "::/0"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	assertGeoIPDAT(t, path, map[string][]string{
+		"CN": {"1.2.3.0/24", "240e::/20", "0.0.0.0/0", "::/0"},
+		"NF": {}, "LAN": lanCIDRs, "PRIVATE": lanCIDRs,
+	})
+	if err := writeGeoIPDAT(path, nil, []string{"invalid"}); err == nil {
+		t.Fatal("expected invalid CIDR to fail")
 	}
 }
 
