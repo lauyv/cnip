@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -257,7 +258,7 @@ func writeOutputs(dir string, writer *mmdbwriter.Tree, cidrs, nfCIDRs []string) 
 		}
 	}()
 
-	if err := writeFile(filepath.Join(staging, "chnroutes.mmdb"), func(w io.Writer) error {
+	if err := writeFileWithChecksum(filepath.Join(staging, "chnroutes.mmdb"), func(w io.Writer) error {
 		_, err := writer.WriteTo(w)
 		return err
 	}); err != nil {
@@ -317,7 +318,7 @@ func writeGeoIPDAT(path string, cnCIDRs, nfCIDRs []string) error {
 		data = protowire.AppendTag(data, 1, protowire.BytesType)
 		data = protowire.AppendBytes(data, entry)
 	}
-	return writeFile(path, func(w io.Writer) error {
+	return writeFileWithChecksum(path, func(w io.Writer) error {
 		_, err := w.Write(data)
 		return err
 	})
@@ -372,6 +373,19 @@ func replaceOutputDir(staging, dir string) error {
 		}
 	}
 	return nil
+}
+
+func writeFileWithChecksum(path string, write func(io.Writer) error) error {
+	checksum := sha256.New()
+	if err := writeFile(path, func(w io.Writer) error {
+		return write(io.MultiWriter(w, checksum))
+	}); err != nil {
+		return err
+	}
+	return writeFile(path+".sha256sum", func(w io.Writer) error {
+		_, err := fmt.Fprintf(w, "%x  %s\n", checksum.Sum(nil), filepath.Base(path))
+		return err
+	})
 }
 
 func writeFile(path string, write func(io.Writer) error) error {

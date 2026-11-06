@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -262,8 +263,21 @@ func TestWriteOutputs(t *testing.T) {
 				"CN": cidrs, "NF": {"23.246.0.0/18", "2607:fb10::/32"},
 				"LAN": lanCIDRs, "PRIVATE": lanCIDRs,
 			})
-			if len(entries) != 6 {
+			if len(entries) != 8 {
 				t.Fatalf("unexpected output files: %v", entries)
+			}
+			for _, name := range []string{"chnroutes.mmdb", "chnroutes.dat"} {
+				data, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				checksum, err := os.ReadFile(filepath.Join(dir, name+".sha256sum"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := fmt.Sprintf("%x  %s\n", sha256.Sum256(data), name); string(checksum) != want {
+					t.Fatalf("unexpected %s checksum: got %q, want %q", name, checksum, want)
+				}
 			}
 			entries, err = os.ReadDir(filepath.Dir(dir))
 			if err != nil {

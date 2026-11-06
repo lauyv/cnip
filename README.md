@@ -15,14 +15,16 @@
 GitHub Actions 每天北京时间 20:00 构建一次，并在 `main` 更新时自动构建。源码保存在
 `main` 分支，产物发布到 `rel` 分支；该分支每次发布都会重建，只保留最新结果。
 
-| 文件             | 格式                                                   |
-| ---------------- | ------------------------------------------------------ |
-| `chnroutes.mmdb` | MaxMind GeoIP2 MMDB（含 CN + NF + LAN）                |
-| `chnroutes.dat`  | V2Ray GeoIPList protobuf（含 CN + NF + LAN + PRIVATE） |
-| `chnroutes.txt`  | 纯文本 CIDR 列表                                       |
-| `chnroutes.srs`  | 中国地址 sing-box 编译后的 rule set                    |
-| `netflix.txt`    | Netflix IPv4/IPv6 CIDR 列表                            |
-| `netflix.srs`    | Netflix sing-box 编译后的 rule set                     |
+| 文件                       | 格式                                                   |
+| -------------------------- | ------------------------------------------------------ |
+| `chnroutes.mmdb`           | MaxMind GeoIP2 MMDB（含 CN + NF + LAN）                |
+| `chnroutes.mmdb.sha256sum` | `chnroutes.mmdb` 的 SHA-256 校验文件                   |
+| `chnroutes.dat`            | V2Ray GeoIPList protobuf（含 CN + NF + LAN + PRIVATE） |
+| `chnroutes.dat.sha256sum`  | `chnroutes.dat` 的 SHA-256 校验文件                    |
+| `chnroutes.txt`            | 纯文本 CIDR 列表                                       |
+| `chnroutes.srs`            | 中国地址 sing-box 编译后的 rule set                    |
+| `netflix.txt`              | Netflix IPv4/IPv6 CIDR 列表                            |
+| `netflix.srs`              | Netflix sing-box 编译后的 rule set                     |
 
 下载地址格式：
 
@@ -34,11 +36,20 @@ https://github.com/lauyv/cnip/raw/rel/<文件名>
 
 ```text
 https://github.com/lauyv/cnip/raw/rel/chnroutes.mmdb
+https://github.com/lauyv/cnip/raw/rel/chnroutes.mmdb.sha256sum
 https://github.com/lauyv/cnip/raw/rel/chnroutes.dat
+https://github.com/lauyv/cnip/raw/rel/chnroutes.dat.sha256sum
 https://github.com/lauyv/cnip/raw/rel/chnroutes.txt
 https://github.com/lauyv/cnip/raw/rel/chnroutes.srs
 https://github.com/lauyv/cnip/raw/rel/netflix.txt
 https://github.com/lauyv/cnip/raw/rel/netflix.srs
+```
+
+将数据库文件和对应的 `.sha256sum` 下载到同一目录后，可校验文件完整性：
+
+```bash
+sha256sum -c chnroutes.mmdb.sha256sum
+sha256sum -c chnroutes.dat.sha256sum
 ```
 
 ## V2Ray 地址库
@@ -81,7 +92,7 @@ go mod download
 go run main.go
 ```
 
-输出文件会生成在 `dist/` 目录下。`chnroutes.json` 和 `netflix.json` 是编译 SRS 时使用的中间文件；GitHub Actions 会将它们编译为对应的 `.srs` 后发布。
+输出文件会生成在 `dist/` 目录下，其中包含 `chnroutes.mmdb` 和 `chnroutes.dat` 对应的 `.sha256sum` 校验文件。`chnroutes.json` 和 `netflix.json` 是编译 SRS 时使用的中间文件；GitHub Actions 会将它们编译为对应的 `.srs` 后发布。
 
 ## 自动化更新
 
